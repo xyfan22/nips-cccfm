@@ -1,0 +1,1334 @@
+'''
+Mostly copy-paste from timm library.
+https://github.com/rwightman/pytorch-image-models/blob/master/timm/models/vision_transformer.py
+'''
+import math
+from typing import (
+    Dict,
+    List,
+    Literal,
+    Optional,
+)
+
+import numpy as np
+import torch
+from einops import rearrange, repeat
+from torch import einsum, nn
+from torch.nn import TransformerEncoder, TransformerEncoderLayer
+from torch.nn.attention import SDPBackend, sdpa_kernel
+from torch.nn.functional import scaled_dot_product_attention
+from tqdm import tqdm
+from transformers import BertForMaskedLM
+
+from scmaskgit.src.utils import (
+    generate_pad,
+    gumbel_sample,
+    mean_nonpadding_embs,
+    noise_schedule,
+    top_k,
+    uniform,
+)
+
+class PositionalEncoding(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        length: int,
+        n_time_steps: int,
+        # encoder: Literal[
+        #     'GF_frozen', 'GF_fine_tuned', 'Transformer_encoder'
+        # ] = 'GF_frozen',
+        mode: Literal[
+            'time_pos_sin',
+            'comb_sin',
+            'sin_learnt',
+            'time_pos_learnt',
+        ] = 'time_pos_sin',
+    ):
+        '''
+        Description:
+        ------------
+        Positional encoding for the transformer model.
+
+        Parameters:
+        -----------
+        d_model: `int`
+            Token embedding dimension.
+        length: `int`
+            Length of the positional encoding.
+        n_time_steps: `int`
+            Number of time steps for training.
+        encoder: : Literal['GF_frozen', 'GF_fine_tuned', 'Transformer_encoder']
+            Transformer encoder type.
+        mode: Literal['time_pos_sin', 'comb_sin', 'sin_learnt', 'time_pos_learnt']
+            'time_pos_learn' cannot be used for time interpolation and extrapolation.
+            -> the missing time step encoding is not available during training.
+        Returns:
+        --------
+        x: `torch.Tensor`
+            Token embeddings with positional encoding.
+            Shape ``[batch_size, seq_len, d_model]``
+        '''
+        super(PositionalEncoding, self).__init__()
+        self.d_model = d_model
+        self.length = length
+        self.n_time_steps = n_time_steps
+        self.mode = mode
+
+        if self.mode == 'time_pos_sin':
+            self.register_buffer(
+                'time_pe', self._generate_sinusoidal_encoding(n_time_steps, d_model)
+            )
+            self.register_buffer(
+                'pos_pe', self._generate_sinusoidal_encoding(length, d_model)
+            )
+        elif self.mode == 'comb_sin':
+            total_seq_length = n_time_steps * length
+            self.register_buffer(
+                'pe', self._generate_sinusoidal_encoding(total_seq_length, d_model)
+            )
+        elif self.mode == 'sin_learnt':
+            self.register_buffer(
+                'time_pe', self._generate_sinusoidal_encoding(n_time_steps, d_model)
+            )
+            self.pos_encoding = self._generate_learnt_encoding(length, d_model)
+            position_ids = torch.arange(length).expand((1, -1))
+            self.register_buffer('pos_ids', position_ids)
+        elif self.mode == 'time_pos_learnt':
+            self.time_encoding = self._generate_learnt_encoding(n_time_steps, d_model)
+            position_ids = torch.arange(n_time_steps).expand((1, -1))
+            self.register_buffer('time_pos_ids', position_ids)
+            self.pos_encoding = self._generate_learnt_encoding(length, d_model)
+            position_ids = torch.arange(length).expand((1, -1))
+            self.register_buffer('pos_ids', position_ids)
+        else:
+            raise ValueError(f'Invalid mode: {mode}')
+
+    def _generate_sinusoidal_encoding(self, length, d_model, buffer_name='pe'):
+        pe = torch.zeros(length, d_model)
+        position = torch.arange(0, length, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2).float() * -(math.log(10000.0) / d_model)
+        )
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        self.register_buffer(buffer_name, pe.unsqueeze(0))
+        return pe.unsqueeze(0)
+
+    def _generate_learnt_encoding(self, length, d_model):
+        return nn.Embedding(length, d_model)
+
+    def forward(self, x, tgt_time_step=None):
+        if self.mode == 'time_pos_sin':
+            time_pe = self.time_pe[:, tgt_time_step]
+            time_pe = time_pe.unsqueeze(0).expand(x.size(0), x.size(1), -1)
+            pos_pe = self.pos_pe[:, : x.size(1)]
+            return x + time_pe + pos_pe
+        elif self.mode == 'comb_sin':
+            start_pos = (tgt_time_step_) * self.length
+            end_pos = start_pos + x.size(1)
+            pe = self.pe[:, start_pos:end_pos]
+            return x + pe
+        elif self.mode == 'sin_learnt':
+            time_pe = self.time_pe[:, tgt_time_step_]
+            time_pe = time_pe.unsqueeze(0).expand(x.size(0), x.size(1), -1)
+            pos_ids = self.pos_ids[:, : x.size(1)]
+            pos_ids = pos_ids.expand(x.size(0), -1)
+            pos_pe = self.pos_encoding(pos_ids)
+            return x + time_pe + pos_pe
+        elif self.mode == 'time_pos_learnt':
+            time_pos_ids = self.time_pos_ids[:, tgt_time_step_]
+            time_pos_ids = time_pos_ids.expand(x.size(0), -1)
+            time_pe = self.time_encoding(time_pos_ids)
+            pos_ids = self.pos_ids[:, : x.size(1)]
+            pos_ids = pos_ids.expand(x.size(0), -1)
+            pos_pe = self.pos_encoding(pos_ids)
+            return x + time_pe + pos_pe
+
+
+class Mlp(nn.Module):
+    def __init__(
+        self,
+        in_features: int,
+        act_layer: nn.Module = nn.GELU,
+        drop: float = 0.0,
+        hidden_features: Optional[int] = None,
+        out_features: Optional[int] = None,
+    ):
+        super().__init__()
+
+        out_features = out_features or in_features
+        hidden_features = hidden_features or in_features
+        self.fc1 = nn.Linear(in_features, hidden_features)
+        self.act = act_layer()
+        self.fc2 = nn.Linear(hidden_features, out_features)
+        self.drop = nn.Dropout(drop)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.act(x)
+        x = self.drop(x)
+        x = self.fc2(x)
+        x = self.drop(x)
+        return x
+
+
+class CrossAttention(nn.Module):
+    def __init__(
+        self,
+        query_dim: int,
+        num_heads: int = 8,
+        dim_head: int = 64,
+        dropout: float = 0.0,
+        context_dim: Optional[int] = None,
+        return_attn: bool = False,
+    ):
+        '''
+        Description:
+        ------------
+        Cross attention module for transformer model with two options:
+        - self attention: context_dim is None
+        - cross attention: context_dim is not None
+
+        Parameters:
+        -----------
+        query_dim: `int`
+            Query dimension.
+        context_dim: `int`
+            Context dimension.
+        num_heads: `int`
+            Number of attention heads.
+        dim_head: `int`
+            Dimension of the attention head.
+        dropout: `float`
+            Dropout rate.
+        '''
+        super().__init__()
+        inner_dim = dim_head * num_heads
+        if context_dim is None:
+            context_dim = query_dim
+        self.scale = dim_head**-0.5
+        self.num_heads = num_heads
+        self.to_q = nn.Linear(query_dim, inner_dim, bias=False)
+        self.to_k = nn.Linear(context_dim, inner_dim, bias=False)
+        self.to_v = nn.Linear(context_dim, inner_dim, bias=False)
+        self.to_out = nn.Sequential(
+            nn.Linear(inner_dim, query_dim), nn.Dropout(dropout)  # projection head
+        )
+        self.return_attn = return_attn
+        self.dim_head = dim_head
+        self.num_heads = num_heads
+
+    def normal_attention(self, q, k, v, h, mask=None, return_attn=False):
+        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (q, k, v))
+        sim = einsum('b i d, b j d -> b i j', q, k) * self.scale
+        if mask is not None:
+            mask = rearrange(mask, 'b ... -> b (...)')
+            max_neg_value = -torch.finfo(sim.dtype).max
+            mask = repeat(mask, 'b j -> (b h) () j', h=h)
+            sim.masked_fill_(mask, max_neg_value)
+        attn = sim.softmax(dim=-1)
+        out = einsum('b i j, b j d -> b i d', attn, v)
+        out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
+        if return_attn:
+            return out, attn
+        return out, attn
+
+    def sdpa_attention(self, q, k, v, h, mask=None, return_attn=False, identity=None):
+        _, seq_len_q, _ = q.shape
+        _, seq_len_k, _ = k.shape
+        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h=h), (q, k, v))
+        if mask is not None:
+            # Expand the mask to match the target shape:
+            mask = mask.unsqueeze(1).unsqueeze(2)
+            mask = mask.expand(-1, h, seq_len_q, seq_len_k)
+            # negate mask so that padding tokens=False
+            mask = ~mask
+        if return_attn & (identity is not None):
+            identity = identity.expand(q.size(0), self.num_heads, -1, -1)
+
+        with sdpa_kernel(
+            backends=[SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION]
+        ):
+            out_ = scaled_dot_product_attention(
+                query=q,
+                key=k,
+                value=identity if return_attn else v,
+                attn_mask=mask,
+                is_causal=False,
+            )
+        if return_attn:
+            out = out_ @ v
+            attn = out_
+            # average attention weights over heads
+            attn = attn.mean(dim=1)
+        else:
+            out = out_
+            attn = None
+        del out_
+        out = rearrange(out, ' b h n d -> b n (h d)', h=h)
+        return out, attn
+
+    def forward(
+        self,
+        x,
+        context=None,
+        mask=None,
+        attention_mode='sdpa',
+    ):
+        h = self.num_heads
+        q = self.to_q(x)
+        if context is None:
+            context = x
+        k = self.to_k(context)
+        v = self.to_v(context)
+        if self.return_attn:
+            identity = torch.eye(k.size(1), device=k.device)
+        else:
+            identity = None
+        if attention_mode == 'normal':
+            out, attn = self.normal_attention(
+                q, k, v, h, mask, return_attn=self.return_attn
+            )
+        elif attention_mode == 'sdpa':
+            out, attn = self.sdpa_attention(
+                q,
+                k,
+                v,
+                h,
+                mask,
+                return_attn=self.return_attn,
+                identity=identity,
+            )
+        else:
+            raise ValueError(f'Invalid attention mode: {attention_mode}')
+        return self.to_out(out), attn
+
+
+class Block(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        d_ff: int,
+        hidden_size: int,
+        dropout: float = 0.0,
+        act_layer: nn.Module = nn.GELU,
+        norm_layer: nn.Module = nn.LayerNorm,
+        context_dim: Optional[int] = None,
+        return_attn: bool = False,
+    ):
+        '''
+        Description:
+        ------------
+        Transformer block with self attention and cross attention.
+        Encoder output is used as context for cross attention.
+
+        Parameters:
+        -----------
+        dim: `int`
+            Query dimension.
+        num_heads: `int`
+            Number of attention heads.
+        d_ff: `int`
+            Dimension of attention head.
+        hidden_size: `int`
+            Hidden size of the feed forward network.
+        dropout: `float`
+            Dropout rate.
+        act_layer: `nn.Module`
+            Activation layer.
+        norm_layer: `nn.Module`
+            Normalization layer.
+        context_dim: `int`
+            Context dimension for cross attention.
+        Returns:
+        --------
+        x: `torch.Tensor`
+            Output tensor.
+        '''
+        super().__init__()
+        self.norm1 = norm_layer(dim)
+        # self attention by not passing context dim
+        self.self_attn = CrossAttention(
+            query_dim=dim,
+            num_heads=num_heads,
+            dim_head=d_ff,
+            dropout=dropout,
+            return_attn=return_attn,
+        )
+        self.norm3 = norm_layer(dim)
+        self.feed_forward = Mlp(
+            in_features=dim, hidden_features=hidden_size, act_layer=act_layer
+        )  # add hidden size
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x, tgt_mask=None):
+        attn_out, self_attn_weigths = self.self_attn(x, mask=tgt_mask)
+        x = self.norm1(x + self.dropout(attn_out))
+        ff_output = self.feed_forward(x)
+        x = self.norm3(x + self.dropout(ff_output))
+        return x, self_attn_weigths
+
+
+class Encoder(nn.Module):
+    '''
+    Description:
+    ------------
+    Transformer encoder modified from
+    URL: https://pytorch.org/tutorials/beginner/transformer_tutorial.html # noqa
+    Last accessed: 2024-05-19
+    Parameters:
+    -----------
+    total_vocab_size: `int`
+        Total vocabulary size.
+    max_seq_length: `int`
+        Maximum sequence length.
+    n_time_steps: `int`
+        Number of time steps for positional encoding.
+    d_model: `int`
+        Token embedding dimension.
+    nhead: `int`
+        Number of attention heads.
+    nlayers: `int`
+        Number of attention layers.
+    dropout: `float`
+        Dropout rate.
+    d_ff: `int`
+        Dimension of the feed forward network.
+    pos_encoding_mode: `str` (default: 'learnt')
+        Positional encoding type: ['sinusoidal', 'learnt'].
+    Returns:
+    --------
+    output: `torch.Tensor`
+        Output tensor.
+    '''
+
+    def __init__(
+        self,
+        total_vocab_size: int,
+        max_seq_length: int,
+        n_time_steps: int,
+        d_model: int = 256,
+        nhead: int = 4,
+        nlayers: int = 6,
+        dropout: float = 0.02,
+        d_ff: int = 512,
+        pad_token: int = 0,
+        pos_encoding_mode: Literal[
+            'time_pos_sin', 'comb_sin', 'sin_learnt', 'time_pos_learnt'
+        ] = 'time_pos_sin',
+    ):
+        super().__init__()
+        self.pos_embedding = PositionalEncoding(
+            d_model=d_model,
+            length=max_seq_length,
+            n_time_steps=n_time_steps,
+            encoder='Transformer_encoder',
+            mode=pos_encoding_mode,
+        )
+        encoder_layers = TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=d_ff,
+            activation='gelu',
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.transformer_encoder = TransformerEncoder(
+            encoder_layers,
+            num_layers=nlayers,
+            norm=nn.LayerNorm(d_model),
+        )
+        self.token_embedding = nn.Embedding(
+            total_vocab_size, d_model, padding_idx=pad_token
+        )
+        nn.init.xavier_uniform_(self.token_embedding.weight)
+
+        self.d_model = d_model
+        self.total_vocab_size = total_vocab_size
+        self.init_weights()
+
+    def init_weights(self) -> None:
+        initrange = 0.1
+        self.token_embedding.weight.data.uniform_(-initrange, initrange)
+
+    def forward(self, src: torch.Tensor, src_mask: torch.Tensor = None) -> torch.Tensor:
+        '''
+        Parameters:
+        -----------
+        src: `torch.Tensor`
+            shape ``[batch_size, seq_len, total_vocab_size]``
+        src_mask: `torch.Tensor`
+            shape ``[batch_size, seq_len]``
+        Returns:
+        --------
+        output: `torch.Tensor`
+            shape ``[batch_size, seq_len, total_vocab_size]``
+        '''
+        src_embedding = self.token_embedding(src) * math.sqrt(self.d_model)
+        dec_embedding = self.pos_embedding(src_embedding, tgt_time_step=0)
+        output = self.transformer_encoder(
+            dec_embedding,
+            src_key_padding_mask=src_mask,
+        )
+        return output
+
+
+class scmoscf(nn.Module):
+    def __init__(
+        self,
+        tgt_vocab_size: int = 25426,
+        d_model: int = 256,
+        num_heads: int = 8,
+        num_layers: int = 1,
+        d_ff: int = 2048,
+        max_seq_length: int = 2048,
+        dropout: float = 0.0,
+        mlm_probability: float = 0.3,
+        pred_tps: List[int] = [
+            1,
+            2,
+            3,
+        ],
+        n_total_tps: int = 3,
+        mask_scheduler: str = 'cosine',
+        encoder='GF_frozen',
+        pos_encoding_mode: Literal[
+            'time_pos_sin', 'comb_sin', 'sin_learnt', 'time_pos_learnt'
+        ] = 'time_pos_sin',
+        return_attn: bool = False,
+        context_tps: Optional[List[int]] = None,
+        pad_token: int = 0,
+    ):
+        '''
+        Description:
+        ------------
+        Seq2Seq model for cell generation
+        using masked language modeling adopted from MaskGIT.
+        Parameters:
+        -----------
+        tgt_vocab_size: `int`
+            Target vocabulary size.
+        d_model: `int`
+            Token embedding dimension.
+        num_heads: `int`
+            Number of attention heads.
+        num_layers: `int`
+            Number of attention layers.
+        d_ff: `int`
+            Dimension of the feed forward network.
+        max_seq_length: `int`
+            Maximum sequence length.
+        dropout: `float`
+            Dropout rate.
+        mlm_probability: `float`
+            Fraction of tokens to mask.
+        pre_tps: `list`
+            List of time steps for training and testing.
+            the proportion of tokens to mask.
+        context_tps: `list`
+            List of context time steps.
+        n_total_tps: `int`
+            Total number of target time steps.
+        mask_scheduler: `str`
+            Masking scheduler defining
+        mode: Literal['GF_frozen', 'GF_fine_tuned', 'Transformer_encoder']
+            Mode of the encoder.
+        pos_encoding_mode:
+            Literal['time_pos_sin', 'comb_sin', 'sin_learnt', 'time_pos_learnt']
+            Positional encoding type.
+        Returns:
+        --------
+        outputs: `dict`
+            Output dictionary containing the following keys:
+            - 'dec_logits': Decoder logits.
+            - 'labels': True labels for masked tokens.
+            - 'selected_time_step': Selected time step.
+            - 'dec_embedding': Decoder embeddings.
+            - 'mean_embedding': Mean embeddings for non-padding tokens.
+        '''
+        super(scmoscf, self).__init__()
+        self.pos_embedding = PositionalEncoding(
+            d_model=d_model,
+            length=max_seq_length,
+            n_time_steps=n_total_tps,
+            mode=pos_encoding_mode,
+        )
+        self.num_features = self.embed_dim = d_model
+        self.mlm_probability = mlm_probability
+        self.tgt_vocab_size = tgt_vocab_size
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.num_layers = num_layers
+        self.d_ff = d_ff
+        self.max_seq_length = max_seq_length
+        self.dropout = dropout
+        self.pred_tps = pred_tps
+        self.context_tps = context_tps
+        self.total_tps = list(range(1, n_total_tps + 1))
+        self.mask_token = 1
+        # add number of CLS tokens to the vocab size
+        total_vocab_size = tgt_vocab_size + n_total_tps
+        self.token_embedding = nn.Embedding(
+            total_vocab_size, d_model, padding_idx=pad_token
+        )
+        self.decoder_block = nn.ModuleList(
+            [
+                Block(
+                    dim=d_model,
+                    num_heads=num_heads,
+                    d_ff=d_ff,
+                    hidden_size=d_model,
+                    dropout=dropout,
+                    return_attn=return_attn,
+                )
+                for _ in range(num_layers)
+            ]
+        )
+        self.decoder_fc = nn.Linear(d_model, tgt_vocab_size)
+        self.dropout = nn.Dropout(dropout)
+        self.mask_scheduler = mask_scheduler
+
+    def generate_mask(
+        self,
+        tgt_input_id,
+        tgt_pad,
+        mlm_probability=0.15,
+        mask_mode='MASKGIT',
+        mask_scheduler='cosine',
+    ):
+        '''
+        Description:
+        ------------
+        Prepare masked tokens for the target input.
+
+        Parameters:
+        -----------
+        tgt_input_id: `torch.Tensor`
+            Target token input.
+        tgt_pad: `torch.Tensor`
+            Target padding mask.
+        mlm_probability: `float`
+            Fraction of tokens to mask.
+        mask_mode: `str`
+            Masking mode: ['BERT', 'MASKGIT']
+            BERT: 80% MASK, 10% random, 10% original.
+            MASKGIT: mask tokens based on the mask scheduler.
+        mask_scheduler: `str`
+            Masking scheduler defining
+            the proportion of tokens to mask for MASKGIT.
+
+        Returns:
+        --------
+        tgt_input_id: `torch.Tensor`
+            Target token input with masked tokens.
+        labels: `torch.Tensor`
+            True labels for masked tokens. Return -100 for non-masked tokens.
+        '''
+        device = tgt_input_id.device
+        labels = tgt_input_id.clone()
+        if mask_mode == 'BERT':
+            # Masked language modeling for the target tokens.
+            # Prepare masked tokens inputs/labels for masked language modeling:
+            # 80% MASK, 10% random, 10% original.
+            # Modified from Huggingface Transformers library:
+            # https://github.com/huggingface/transformers/blob/main/src/transformers/data/data_collator.py#L840 # noqa
+            # Accessed: 2024-05-12
+            probability_matrix = torch.full_like(
+                tgt_pad, mlm_probability, dtype=torch.float
+            )
+            # Do not mask CLS and PAD tokens
+            cls_tgt_pad = tgt_pad.clone()
+            cls_tgt_pad[:, 0] = True
+
+            probability_matrix = probability_matrix.masked_fill(cls_tgt_pad, 0)
+            masked_indices = torch.bernoulli(probability_matrix).bool()
+            labels[~masked_indices] = -100
+            # replace 80% of the tokens with mask token,
+            # 10% with random token, 10% with original token
+            indices_masked = (
+                torch.bernoulli(torch.full(labels.shape, 0.8, device=device)).bool()
+                & masked_indices
+            )
+            tgt_input_id[masked_indices] = self.mask_token
+            indices_random = (
+                torch.bernoulli(torch.full(labels.shape, 0.5, device=device)).bool()
+                & masked_indices
+                & ~indices_masked
+            )
+            # +1 to exclude pad and cls tokens from random token selection
+            random_tokens = torch.randint(
+                2, self.tgt_vocab_size, labels.shape, dtype=torch.long, device=device
+            )
+            tgt_input_id[indices_random] = random_tokens[indices_random]
+        elif mask_mode == 'MASKGIT':
+            # exclude CLS token, adapt the shape to sequence length-1
+            sample_length = torch.sum(~tgt_pad, dim=1) - 1
+            batch, seq_len = tgt_input_id.shape
+            rand_time = uniform((batch,), device=device)
+            rand_mask_probs = noise_schedule(
+                rand_time,
+                method=mask_scheduler,
+                total_tokens=torch.tensor((seq_len - 1), device=device),
+            )
+            num_token_masked = (
+                (torch.mul(sample_length, rand_mask_probs)).round().clamp(min=1)
+            )
+            rand_int = torch.rand((batch, seq_len - 1), device=device)
+            # exclude CLS token and set pad token to 1 to exclude from masking
+            rand_int[tgt_pad[:, 1:]] = 1
+            batch_randperm = rand_int.argsort(dim=-1)
+            mask = batch_randperm < rearrange(num_token_masked, 'b -> b 1')
+            # concatenate CLS boolean mask
+            mask = torch.cat(
+                [torch.zeros((batch, 1), dtype=torch.bool, device=device), mask], dim=-1
+            )
+            tgt_input_id[mask] = self.mask_token
+            labels[~mask] = -100
+        return tgt_input_id, labels
+
+    def call_padding(
+        self,
+        tgt_input_id_dict,
+        time_steps,
+    ):
+        tgt_pad_dict = {}
+        for time_step in time_steps:
+            tgt_input_id = tgt_input_id_dict[f'tgt_input_ids_t{time_step}']
+            tgt_pad_dict[f'tgt_pad_t{time_step}'] = generate_pad(tgt_input_id)
+        return tgt_pad_dict
+
+    def call_decoder(
+        self,
+        enc_output,
+        src_attention_mask,
+        # dec_embedding,
+        # tgt_pad,
+        # time_random,
+        labels=None,
+    ):
+        self_attn_list = []
+        cross_attn_list = []
+        for dec_layer in self.decoder_block:
+            # see if concatenation of cls embedding
+            dec_embedding, self_attn_weights = dec_layer(
+                x=enc_output,
+                tgt_mask=src_attention_mask,
+            )
+            if self_attn_weights is not None:
+                self_attn_list.append(self_attn_weights)
+        # also convert to float 16 for memory efficiency
+        if len(self_attn_list) > 0:
+            self_attn_weights = (
+                torch.stack(self_attn_list).mean(dim=0).to(torch.float16)
+            )
+        # :TODO rewrite this part logits not needed for running the other timepoints
+        decoder_logits = self.decoder_fc(dec_embedding)
+
+        outputs = {
+            'dec_embedding': dec_embedding,
+            'self_attn_weights': self_attn_weights,
+            'dec_logits': decoder_logits,
+            'labels': labels,
+            'mean_embedding': mean_nonpadding_embs(embs=dec_embedding, pad=src_attention_mask),
+        }
+        return outputs
+
+    def forward(
+        self,
+        src_input_id: torch.Tensor,
+        masked: bool = True,
+        tgt_time_step: Optional[int] = None,
+        tgt_input_id_dict: Optional[dict] = None,
+        generate_id_dict: Optional[dict] = None,
+        generate_pad_dict: Optional[dict] = None,
+    ):
+        '''
+        Description:
+        ------------
+        Forward pass for the Seq2Seq model.
+        Parameters:
+        -----------
+        src_input_id: `torch.Tensor`
+            Source token input.
+        not_masked: `bool`
+            Whether to mask tokens. Should not be masked for testing and generation.
+        tgt_time_step: `int`
+            Target time step.
+        context_mode: `bool`
+            Whether to use context mode, where other time steps are used as context.
+        tgt_input_id_dict: `Optional[dict]`
+            Dictionary of target token inputs from different time steps.
+        generate_id_dict: `Optional[dict]`
+            Dictionary of target token inputs for generation.
+        generate_pad_dict: `Optional[dict]`
+            Dictionary of target padding masks for generation.
+        Returns:
+        --------
+        outputs: `dict`
+            Output dictionary
+        '''
+       
+        src_attention_mask = generate_pad(src_input_id)
+        if self.training:
+            src_input_id, labels = self.generate_mask(
+                src_input_id,
+                src_attention_mask,
+                self.mlm_probability,
+                mask_mode='MASKGIT',
+                mask_scheduler=self.mask_scheduler,
+            )
+        else:
+            labels= None
+        src_embedding = self.token_embedding(src_input_id)
+        src_embedding = self.pos_embedding(src_embedding, 1)
+        # does not include any context
+        outputs = self.call_decoder(
+            enc_output=src_embedding,
+            src_attention_mask= src_attention_mask,
+            labels=labels,
+        )
+        
+        return outputs
+
+
+class CountHead(nn.Module):
+    def __init__(
+        self,
+        loss_mode: str = 'zinb',
+        n_genes: int = 25426,
+        d_model: int = 256,  # 256
+        dropout: float = 0.0,
+    ):
+        '''
+        Description:
+        ------------
+        Count prediction head for the Seq2Seq model.
+        Parameters:
+        -----------
+        loss_mode: `str`
+            Loss mode. Options: ['mse', 'zinb', 'nb']
+        n_genes: `int`
+            number of genes to be predicted.
+        d_model: `int`
+            Token embedding dimension.
+        dropout: `float`
+            Dropout rate for the MLP.
+        Returns:
+        --------
+        count_outputs: `dict`
+            Output dictionary containing the following keys:
+            - 'count_lognorm': Log-normalized count prediction for MSE loss.
+            - 'count_mean': Mean count prediction for ZINB and NB loss.
+            - 'count_dropout': Dropout count prediction for ZINB loss.
+        '''
+        super(CountHead, self).__init__()
+        self.loss_mode = loss_mode
+
+        self.mlp = Mlp(
+            in_features=d_model,
+            hidden_features=d_model,
+            drop=dropout,
+        )
+        if self.loss_mode == 'mse':
+            self.relu_output = nn.Sequential(nn.Linear(d_model, n_genes), nn.ReLU())
+        elif self.loss_mode == 'zinb':
+            self.linear_output = nn.Linear(d_model, n_genes)
+            self.softmax_output = nn.Sequential(
+                nn.Linear(d_model, n_genes), nn.Softmax(dim=-1)
+            )
+        elif self.loss_mode == 'nb':
+            self.softmax_output = nn.Sequential(
+                nn.Linear(d_model, n_genes), nn.Softmax(dim=-1)
+            )
+
+    def forward(self, x):
+        # use cls token for count prediction
+        count_outputs = {}
+        mlp_output = self.mlp(x)
+        mlp_output = nn.functional.normalize(mlp_output, dim=-1, p=2)
+        if self.loss_mode == 'mse':
+            count_outputs['count_lognorm'] = self.relu_output(mlp_output)
+        elif self.loss_mode == 'zinb':
+            count_outputs['count_mean'] = self.softmax_output(mlp_output)
+            count_outputs['count_dropout'] = self.linear_output(mlp_output)
+        elif self.loss_mode == 'nb':
+            count_outputs['count_mean'] = self.softmax_output(mlp_output)
+        return count_outputs
+
+
+class CountDecoder(nn.Module):
+    def __init__(
+        self,
+        pretrained_model: nn.Module = None,
+        loss_mode: str = 'zinb',
+        d_model: int = 128,
+        add_mask_id: bool = True,
+        dropout: float = 0.0,
+        pred_tps: list = [1, 2],
+        n_total_tps: int = 3,
+        context_mode: bool = True,
+        n_genes: int = 25426,
+        context_tps: Optional[list[int]] = None,
+    ):
+        '''
+        Description:
+        ------------
+        Loads complete Seq2Seq model with count prediction head.
+        Weights from pretrained seq2seq model are loaded into the model.
+        Use CLS or mean embeddings for count prediction.
+        Parameters:
+        -----------
+        pretrained_model: `nn.Module`
+            Pretrained Seq2Seq model.
+        loss_mode: `str`
+            Loss mode. Options: ['mse', 'zinb', 'nb']
+        d_model: `int`
+            Token embedding dimension.
+        add_mask_id: `bool`
+            Whether to add mask token.
+        dropout: `float`
+            Dropout rate for the MLP.
+        pred_tps: `list`
+            List of time steps for training and testing.
+        context_tps: `list`
+            List of context time steps.
+        n_total_tps: `int`
+            Total number of target time steps.
+        context_mode: `bool`
+            Whether to use context mode, where other time steps are used as context.
+        n_genes: `int`
+            Number of genes which counts should be regressed.
+        Returns:
+        --------
+        count_outputs: `dict`
+            Output dictionary containing the following keys:
+            - 'count_output_t{t}': Count prediction for time step t.
+            - 'count_log_norm': Log-normalized count prediction for MSE loss.
+            - 'count_mean': Mean count prediction for ZINB and NB loss.
+            - 'count_dropout': Dropout count prediction for ZINB loss.
+        '''
+        super(CountDecoder, self).__init__()
+        self.pretrained_model = pretrained_model
+        self.embed_dim = d_model
+
+        self.loss_mode = loss_mode
+        self.count_decoder = CountHead(loss_mode, n_genes, d_model, dropout)
+        if add_mask_id:
+            self.mask_token = 1
+
+        self.pred_tps = pred_tps
+        self.context_tps = context_tps
+        self.total_tps = list(range(1, n_total_tps + 1))
+        self.cls_embedding = None
+        self.context_mode = context_mode
+
+    def generate_pad(self, tgt):
+        tgt_pad = tgt == 0
+        return tgt_pad
+
+    def forward(
+        self,
+        src_input_id: torch.Tensor,
+        tgt_input_id_dict: dict,
+    ):
+        outputs = self.pretrained_model(
+            src_input_id=src_input_id,
+            tgt_input_id_dict=tgt_input_id_dict,
+            not_masked=True,
+            context_mode=self.context_mode,
+        )
+        count_outputs = {}
+        for _, t in enumerate(self.pred_tps):
+            cls_embedding = outputs['mean_embedding'][t]
+            count_outputs_tmp = self.count_decoder.forward(cls_embedding)
+            count_outputs[f'count_output_t{t}'] = count_outputs_tmp
+
+        return count_outputs
+
+    def call_padding(self, src_input_id, tgt_input_id_dict, time_steps):
+        tgt_pad_dict = {}
+        tgt_pad_dict['src_pad'] = self.generate_pad(src_input_id)
+        for time_step in time_steps:
+            tgt_input_id = tgt_input_id_dict[f'tgt_input_ids_t{time_step}']
+            tgt_pad_dict[f'tgt_pad_t{time_step}'] = self.generate_pad(tgt_input_id)
+        return tgt_pad_dict
+
+    def generate(
+        self,
+        src_input_id: torch.Tensor,
+        tgt_input_id_dict: dict,
+        can_remask_prev_masked: bool = False,
+        topk_filter_thres: float = 0.9,
+        temperature: float = 2.0,  # keep in range 2.0-3.0
+        iterations: int = 18,  # optimal of iterations in MaskGIT
+        mask_scheduler: str = 'cosine',
+        sequence_length: int = 2048,
+    ):
+        '''
+        Description:
+        ------------
+        Generate sequences for the target tokens
+        adopted from MaskGIT using the pretrained model.
+        After T iterations when all tokens are predicted,
+        use mean non-padding embeddings for count prediction.
+
+        Parameters:
+        -----------
+        src_input_id: `torch.Tensor`
+            Source token input.
+        tgt_input_id_dict: `dict`
+            Dictionary of target token inputs from different time steps.
+        max_len: `int`
+            Maximum length of the generated sequence.
+        can_remask_prev_masked: `bool`
+            Whether to remask previously masked tokens.
+        topk_filter_thres: `float`
+            Top-k filter threshold based on the logits.
+        temperature: `float`
+            Temperature to increase or decrease the randomness of the predictions.
+        iterations: `int`
+            Number of iterations until all tokens are predicted.
+        mask_scheduler: `str`
+            Mask scheduler function.
+            Options: ['uniform', 'pow', 'cosine', 'log', 'exp']
+        sequence_length: `int`
+            Maximum length of the generated sequence.
+        Returns:
+        --------
+        `tuple` containing:
+            - count_outputs: `dict`
+                Output dictionary containing the following keys:
+                - 'count_output_t{t}': Count prediction for time step t.
+                - 'cls_embedding_t{t}': CLS token embeddings for time step t.
+            - 'generate_id_dict': Dictionary of generated token ids.
+        '''
+        generate_id_dict: Dict[str, torch.Tensor] = {}
+        count_outputs: Dict[str, torch.Tensor] = {}
+        if self.context_tps is not None:
+            all_modelling_tps = self.pred_tps + self.context_tps
+            all_modelling_tps = sorted(list(set(all_modelling_tps)))
+        else:
+            all_modelling_tps = sorted(self.pred_tps)
+        tgt_pad_dict = self.call_padding(
+            src_input_id, tgt_input_id_dict, all_modelling_tps
+        )
+        # filter tgt_input_id_dict to include only all_modelling_tps
+        tgt_input_id_dict = {
+            k: v
+            for k, v in tgt_input_id_dict.items()
+            if int(k.split('_t')[-1]) in all_modelling_tps
+        }
+
+        for time_step in self.pred_tps:
+            tgt_input_id_dict_ = {k: v.clone() for k, v in tgt_input_id_dict.items()}
+            tgt_pad_dict_ = {k: v.clone() for k, v in tgt_pad_dict.items()}
+            # use max shape instead of genes you like to generate
+            pad_tensor = torch.ones_like(tgt_pad_dict_[f'tgt_pad_t{time_step}'])
+            # pass sequence length for generation
+            pad_tensor[:, sequence_length:] = 0
+            tgt_pad = self.generate_pad(pad_tensor)
+            tgt_pad_dict_[f'tgt_pad_t{time_step}'] = tgt_pad
+            tgt_input_id_key = f'tgt_input_ids_t{time_step}'
+            tgt_input_id = tgt_input_id_dict[tgt_input_id_key]
+
+            # create ids and scores matrix for each batch
+            ids = torch.full_like(tgt_input_id, self.mask_token, dtype=torch.long)
+            # add cls token to the ids
+            ids[:, 0] = tgt_input_id[:, 0]
+            # replace the rest of the tokens with pad token
+            ids[:, :sequence_length] = 0
+            tgt_input_id_dict_[tgt_input_id_key] = ids
+            # pad ids
+            scores = torch.zeros_like(tgt_input_id, dtype=torch.float)
+            outputs, generated_ids = self.generate_sequence(
+                generate_id_dict=tgt_input_id_dict_,
+                generate_pad_dict=tgt_pad_dict_,
+                src_input_id=src_input_id,
+                demask_fn=self.pretrained_model,
+                mask_scheduler=mask_scheduler,
+                can_remask_prev_masked=can_remask_prev_masked,
+                topk_filter_thres=topk_filter_thres,
+                starting_temperature=temperature,
+                iterations=iterations,
+                scores=scores,
+                tgt_time_step=time_step,
+                prompt_length=1,
+            )
+            generate_id_dict[tgt_input_id_key] = generated_ids
+
+            cls_embedding = mean_nonpadding_embs(
+                embs=outputs['dec_embedding'],
+                pad=tgt_pad,
+            )
+
+            count_outputs_tmp = self.count_decoder.forward(cls_embedding)
+            count_outputs[f'count_output_t{time_step}'] = count_outputs_tmp
+            count_outputs[f'cls_embedding_t{time_step}'] = cls_embedding
+        return count_outputs, generate_id_dict
+
+    def guided_generate(
+        self,
+        src_input_id: torch.Tensor,
+        tgt_input_id_dict: dict,
+        can_remask_prev_masked: bool = False,
+        topk_filter_thres: float = 0.9,
+        temperature: float = 2.0,  # keep in range 2.0-3.0
+        iterations: int = 18,  # optimal of iterations in MaskGIT
+        mask_scheduler: str = 'cosine',
+        sequence_length: int = 2048,
+        unique_gene_list: Optional[dict] = None,
+        shared_gene_list: Optional[dict] = None,
+    ):
+        '''
+        Description:
+        ------------
+        Generate sequences for the target tokens using guided generation.
+
+        Parameters:
+        -----------
+        topk_filter_thres: `float`
+            Top-k filter threshold based on the logits.
+        temperature: `float`
+            Temperature to increase or decrease the randomness of the predictions.
+        iterations: `int`
+            Number of iterations until all tokens are predicted.
+        mask_scheduler: `str`
+            Mask scheduler function.
+            Options: ['uniform', 'pow', 'cosine', 'log', 'exp']
+
+        Returns:
+        --------
+        count_outputs: `dict`
+            Output dictionary containing the following keys:
+            - 'count_output_t{t}': Count prediction for time step t.
+            - 'cls_embedding_t{t}': CLS token embeddings for time step t.
+        '''
+        generate_id_dict: Dict[str, torch.Tensor] = {}
+        count_outputs: Dict[str, torch.Tensor] = {}
+        tgt_pad_dict = self.call_padding(
+            src_input_id, tgt_input_id_dict, self.total_tps
+        )
+        for time_step in self.pred_tps:
+            tgt_input_id_dict_ = {k: v.clone() for k, v in tgt_input_id_dict.items()}
+            tgt_pad_dict_ = {k: v.clone() for k, v in tgt_pad_dict.items()}
+            pad_tensor = torch.ones_like(tgt_pad_dict_[f'tgt_pad_t{time_step}'])
+            tgt_input_id_key = f'tgt_input_ids_t{time_step}'
+            tgt_input_id = tgt_input_id_dict[tgt_input_id_key]
+            # create ids and scores matrix for each batch
+            ids = torch.full_like(tgt_input_id, self.mask_token, dtype=torch.long)
+            # add cls token to the ids
+            ids[:, 0] = tgt_input_id[:, 0]
+            ids[:, :sequence_length] = 0
+            tgt_input_id_dict_[tgt_input_id_key] = ids
+            # pad ids
+            scores = torch.zeros_like(tgt_input_id, dtype=torch.float)
+            cls_length = 1
+            # predict the first n genes in first iteration
+            if (unique_gene_list is not None) and (time_step == 1):
+                prompt_length = 10
+                pad_tensor_ = pad_tensor.clone()
+                pad_tensor_[:, prompt_length:] = 0
+                tgt_pad_ = self.generate_pad(pad_tensor_)
+                tgt_pad_dict_[f'tgt_pad_t{time_step}'] = tgt_pad_
+                # pad ids
+                ids[:, prompt_length:] = 0
+                tgt_input_id_dict_[tgt_input_id_key] = ids
+                # use a two-step process to decode the genes
+                outputs, ids_ = self.generate_sequence(
+                    generate_id_dict=tgt_input_id_dict_,
+                    generate_pad_dict=tgt_pad_dict_,
+                    src_input_id=src_input_id,
+                    demask_fn=self.pretrained_model,
+                    mask_scheduler=mask_scheduler,
+                    can_remask_prev_masked=can_remask_prev_masked,
+                    topk_filter_thres=topk_filter_thres,
+                    starting_temperature=temperature,
+                    iterations=10,
+                    scores=scores,
+                    tgt_time_step=time_step,
+                    unique_gene_list=unique_gene_list,
+                    shared_gene_list=shared_gene_list,
+                    prompt_length=cls_length,
+                )
+                # unpad the rest of ids
+                ids_[:, prompt_length:] = 1
+                tgt_input_id_dict_[tgt_input_id_key] = ids_
+            # generate the rest of the genes
+            # use max shape instead of genes you like to generate
+            pad_tensor[:, sequence_length:] = 0
+            ids[:, sequence_length:] = 0
+            tgt_pad = self.generate_pad(pad_tensor)
+            tgt_pad_dict_[f'tgt_pad_t{time_step}'] = tgt_pad
+            tgt_pad = tgt_pad_dict_[f'tgt_pad_t{time_step}']
+            outputs, generated_ids = self.generate_sequence(
+                generate_id_dict=tgt_input_id_dict_,
+                generate_pad_dict=tgt_pad_dict_,
+                src_input_id=src_input_id,
+                demask_fn=self.pretrained_model,
+                mask_scheduler=mask_scheduler,
+                can_remask_prev_masked=can_remask_prev_masked,
+                topk_filter_thres=topk_filter_thres,
+                starting_temperature=temperature,
+                iterations=iterations,
+                scores=scores,
+                tgt_time_step=time_step,
+                unique_gene_list=None,
+                shared_gene_list=None,
+                prompt_length=cls_length,
+            )
+            generate_id_dict[tgt_input_id_key] = generated_ids
+            cls_embedding = mean_nonpadding_embs(
+                embs=outputs['dec_embedding'],
+                pad=tgt_pad,
+            )
+            count_outputs_tmp = self.count_decoder.forward(cls_embedding)
+            count_outputs[f'count_output_t{time_step}'] = count_outputs_tmp
+            count_outputs[f'cls_embedding_t{time_step}'] = cls_embedding
+        return count_outputs, generate_id_dict
+
+    def generate_sequence(
+        self,
+        generate_id_dict: dict,
+        generate_pad_dict: dict,
+        src_input_id: torch.Tensor,
+        demask_fn: nn.Module,
+        mask_scheduler: str,
+        scores: torch.Tensor,
+        can_remask_prev_masked: bool = False,
+        topk_filter_thres: float = 0.9,
+        starting_temperature: float = 2.0,
+        iterations: int = 18,
+        tgt_time_step: Optional[int] = 1,
+        prompt_length: int = 1,
+        unique_gene_list: Optional[dict] = None,
+        shared_gene_list: Optional[dict] = None,
+    ):
+        '''
+        Description:
+        ------------
+        Generate sequences for the target tokens
+        adopted from MaskGIT using the pretrained model.
+        Parameters:
+        -----------
+        generate_id_dict: `dict`
+            Dictionary of target token inputs for generation.
+        generate_pad_dict: `dict`
+            Dictionary of target padding masks for generation.
+        src_input_id: `torch.Tensor`
+            Source token input.
+        demask_fn: `nn.Module`
+            Pretrained model for demasking.
+        mask_scheduler: `str`
+            Mask scheduler function.
+            Options: ['uniform', 'pow', 'cosine', 'log', 'exp']
+        scores: `torch.Tensor`
+            Probability scores for the tokens.
+        can_remask_prev_masked: `bool`
+            Whether to remask previously masked tokens.
+        topk_filter_thres: `float`
+            Top-k filter threshold based on the logits.
+        starting_temperature: `float`
+            Temperature to increase or decrease the randomness of the predictions.
+        iterations: `int`
+            Number of iterations until all tokens are predicted.
+        tgt_time_step: `int`
+            Target time step to generate sequence for.
+        Returns:
+        --------
+        `tuple` containing:
+            outputs: `dict`
+                Output dictionary containing the following keys:
+                - 'dec_logits': Decoder logits.
+                - 'labels': True labels for masked tokens.
+                - 'selected_time_step': Selected time step.
+                - 'dec_embedding': Decoder embeddings.
+                - 'mean_embedding': Mean embeddings for non-padding tokens.
+            tmp_ids: `torch.Tensor`
+                Generated target token inputs.
+        '''
+        max_neg_value = -torch.finfo().max
+        scores[:, :prompt_length] = max_neg_value
+        tmp_ids = generate_id_dict[f'tgt_input_ids_t{tgt_time_step}'].clone()
+        batch_size, seq_len = tmp_ids.shape
+        # find total_tokens by find the numbers of 1s in the mask
+        total_tokens = torch.sum(tmp_ids == 1, dim=1)
+        ids_to_keep = torch.zeros_like(tmp_ids, dtype=torch.long)
+        for iteration, steps_until_x0 in tqdm(
+            zip(
+                torch.linspace(0, 1, iterations),
+                reversed(range(iterations)),
+            ),
+            total=iterations,
+        ):
+            # mask scheduler function, gamma
+            rand_mask_prob = noise_schedule(
+                ratio=iteration,
+                total_tokens=total_tokens,
+                method=mask_scheduler,
+            )
+            # set score to -inf for padding tokens
+            scores = scores.masked_fill(
+                generate_pad_dict[f'tgt_pad_t{tgt_time_step}'], max_neg_value
+            )
+            unmasked = (scores != max_neg_value).sum(dim=1)
+            num_tokens_to_mask = (unmasked.float() * rand_mask_prob).long()
+            mask = torch.zeros_like(scores, dtype=torch.bool)
+            indices_to_mask = torch.topk(
+                scores, num_tokens_to_mask.max(), dim=-1
+            ).indices
+            # Mask the top `num_tokens_to_mask` positions for each sample
+            for i in range(batch_size):
+                mask[i, indices_to_mask[i, : num_tokens_to_mask[i]]] = True
+            tmp_ids = tmp_ids.masked_fill(mask, self.mask_token)
+            # keep indices which are not masked except for the CLS token
+            ids_to_keep = torch.where(
+                mask,
+                torch.tensor(0, dtype=tmp_ids.dtype, device=tmp_ids.device),
+                tmp_ids,
+            )
+            generate_id_dict[f'tgt_input_ids_t{tgt_time_step}'] = tmp_ids
+            outputs = demask_fn.forward(
+                src_input_id=src_input_id,  # target
+                generate_id_dict=generate_id_dict,
+                generate_pad_dict=generate_pad_dict,
+                not_masked=False,
+                tgt_time_step=tgt_time_step,
+                context_mode=self.context_mode,
+            )
+            logits = outputs['dec_logits'][:, prompt_length:, :]
+
+            if (unique_gene_list is not None) and (shared_gene_list is not None):
+                # increase the logits of the genes_to_keep
+                unique_genes = list(unique_gene_list.values())
+                shared_genes = list(shared_gene_list.values())
+                logits[:, :, unique_genes] = logits[:, :, unique_genes] + 5
+                logits[:, :, shared_genes] = logits[:, :, shared_genes] + 2
+            # exclude cls token
+            tmp_ids_ = tmp_ids[:, prompt_length:].clone()
+            scores_ = scores[:, prompt_length:].clone()
+            ids_to_keep_ = ids_to_keep[:, prompt_length:].clone()
+            # Create a mask of already predicted tokens
+            for sample in range(logits.shape[0]):
+                unique_ids = torch.unique(ids_to_keep_[sample])
+                logits[sample, :, unique_ids] = max_neg_value
+            filtered_logits = top_k(logits.clone(), topk_filter_thres)
+            temperature = starting_temperature * (
+                steps_until_x0 / iteration
+            )  # temperature is annealed
+            pred_ids = gumbel_sample(filtered_logits, temperature=temperature, dim=-1)
+
+            is_mask = tmp_ids_ == self.mask_token
+            tmp_ids_ = torch.where(is_mask, pred_ids, tmp_ids_)
+            probs_without_temperature = logits.softmax(dim=-1)
+
+            scores_ = 1 - probs_without_temperature.gather(2, pred_ids[..., None])
+            scores_ = rearrange(scores_, '... 1 -> ...')
+
+            if not can_remask_prev_masked:
+                scores_ = scores_.masked_fill(~is_mask, max_neg_value)
+            # add cls token to the ids and update scores and ids
+            scores[:, prompt_length:] = scores_
+            tmp_ids[:, prompt_length:] = tmp_ids_
+        return outputs, tmp_ids

@@ -1,0 +1,11 @@
+name: cellflow_env
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11.15
+  - pip
+  - setuptools
+  - wheel
+  - pip:
+      - -r requirements.txt

@@ -1,0 +1,20 @@
+dataset_configs:
+  - "scbasecount_fullset:false:gene_symbols"
+genelist_path: "Stack-Large/basecount_1000per_15000max.pkl"
+save_dir: "stack_checkpoints/bc_large"
+max_epochs: 10
+sample_size: 256
+batch_size: 32
+n_hidden: 100
+token_dim: 16
+n_layers: 9
+dropout: 0.0
+num_workers: 4
+learning_rate: 0.0001
+weight_decay: 0.003
+scheduler: cosine
+scheduler_T_max: 10
+scheduler_warmup_epochs: 1
+early_stopping_patience: 10
+no_localize_data: true
+cache_file: "cache/bc.pkl"

@@ -1,0 +1,20 @@
+checkpoint_path: "Stack-Large/bc_large.ckpt"
+dataset_configs:
+  - "human:parse_bio:sample:cell_type:false"
+  - "human:Stack-CellxGene45M:donor_id:author_cell_type:true:feature_name"
+genelist_path: "Stack-Large-Aligned/basecount_1000per_15000max.pkl"
+save_dir: "stack_checkpoints/bc_large_aligned"
+max_epochs: 8
+sample_size: 512
+batch_size: 8
+accumulate_grad_batches: 4
+num_workers: 4
+learning_rate: 0.00002
+weight_decay: 0.003
+scheduler_eta_min: 0.000005
+replacement_ratio: 0.75
+scheduler: cosine
+scheduler_T_max: 8
+scheduler_warmup_epochs: 1
+early_stopping_patience: 5
+cache_file: "cache/parse_cgft.pkl"

@@ -1,0 +1,64 @@
+# ccCFM default configuration
+# 中文: 第一阶段用 argparse 对齐这些字段; 后续切到 hydra 再用 compose.
+
+data:
+  # All paths are relative to the project root.
+  path: data/processed/replogle_preprocessed.h5ad
+  setting: 2line                      # 2line | 3line
+  sources_2line: [K562, RPE1]
+  sources_3line: [K562, RPE1, HepG2]
+  target: Jurkat
+  hvg_count: 6836
+  test_slice_name: jurkat_test_strict  # 严格测试切片, 定义见 docs/data_contract.md
+
+encoder:
+  name: state_se                       # pca | state_se | geneformer | scgpt | uce | scfoundation
+  checkpoint: null                     # 各 encoder 本地权重路径
+  obsm_key: null                       # null 则默认 h_<encoder_name>
+
+pert_token:
+  mode: gene_embedding                 # gene_embedding | concat_secondary
+  primary_embedding_path: data/processed/primary_gene_embedding.pt
+  secondary_embedding_path: null
+  out_dim: 512
+
+model:
+  gene_dim: 6836
+  hidden_dim: 1024
+  n_blocks: 4
+  time_dim: 128
+  # 目前只实现 concat conditioning; FiLM 后续再加.
+
+cfm:
+  use_ot_pairing: false                # 默认关. 开启前请按 docs/problem_setup.md
+                                       # 先保证 dataloader 产出语义安全的 batch
+                                       # (per-line 或 per-(line, pert)).
+  ot_method: exact                     # exact | sinkhorn
+  sigma: 0.0                           # 0 = 纯直线路径; >0 略微 smooth
+
+training:
+  batch_size: 1024
+  lr: 1.0e-4
+  weight_decay: 1.0e-5
+  max_epochs: 50
+  val_every_n_epochs: 1
+  early_stop_metric: val/mmd
+  early_stop_patience: 5
+  grad_clip: 1.0
+  pair_by_line: true                   # control 与 perturbed 必须同 cell_line
+
+trainer:
+  n_gpus: 8
+  precision: 32                        # fp32 保底; gene MLP 对 AMP 可能敏感
+  strategy: ddp
+  accelerator: gpu
+
+output:
+  dir: runs/default
+  save_top_k: 1
+  seed: 42
+
+logging:
+  use_wandb: false
+  project: cccfm-neurips2026
+  run_name: null
