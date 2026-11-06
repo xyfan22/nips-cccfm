@@ -6,7 +6,7 @@ for Cross-Cell-Line Genetic Perturbation Prediction.
     - 每个子模块都有独立 docstring 说明角色与 TODO.
 """
 
-__version__ = "0.0.1"
+__version__ = "0.1.0"
 
 try:
     from cccfm.velocity_net import VelocityNet

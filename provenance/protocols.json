@@ -1,0 +1,146 @@
+{
+  "paper_title": "Zero-Shot Cross-Cell-Line Perturbation Prediction Needs Controls",
+  "authors": [
+    {
+      "name": "Xingyu Fan",
+      "given": "Xingyu",
+      "family": "Fan",
+      "email": "xyfan@link.cuhk.edu.hk",
+      "affiliation": "Department of Computer Science and Engineering, The Chinese University of Hong Kong"
+    },
+    {
+      "name": "Jinghao Wang",
+      "given": "Jinghao",
+      "family": "Wang",
+      "email": "jinghao.w@link.cuhk.edu.hk",
+      "affiliation": "Department of Computer Science and Engineering, The Chinese University of Hong Kong"
+    },
+    {
+      "name": "Chang-Yu Hsieh",
+      "given": "Chang-Yu",
+      "family": "Hsieh",
+      "email": "kimhsieh@zju.edu.cn",
+      "affiliation": "College of Pharmaceutical Sciences, Zhejiang University"
+    },
+    {
+      "name": "Chunbin Gu",
+      "given": "Chunbin",
+      "family": "Gu",
+      "email": "cbgu@cuhk.edu.hk",
+      "affiliation": "Department of Computer Science and Engineering, The Chinese University of Hong Kong"
+    },
+    {
+      "name": "Pheng-Ann Heng",
+      "given": "Pheng-Ann",
+      "family": "Heng",
+      "email": "pheng@cse.cuhk.edu.hk",
+      "affiliation": "Department of Computer Science and Engineering, The Chinese University of Hong Kong"
+    }
+  ],
+  "reference_inputs": {
+    "hvg_list": {
+      "path": "data/processed/hvg_genes.txt",
+      "count": 6642,
+      "sha256": "92b7992fe9a24f9c39c90e876156538d399e2696ee695bc2c95cd5b4aa68f27d"
+    },
+    "strict_slice": {
+      "path": "data/splits/jurkat_test_strict.json",
+      "count": 577,
+      "sha256": "815ef78ec409caed138371b9afb0c0373517f56e45f0759b6c732b39fc11cb5a"
+    },
+    "primary_gene_embedding": {
+      "path": "data/processed/primary_gene_embedding.pt",
+      "distributed": false,
+      "sha256": "1e0f348c29957b70e5c852f219d4c099bced1c7329ca0fe117812ae1f722dd60",
+      "genes": 6641,
+      "dimension": 128,
+      "method": "PCA of standardized gene expression patterns across control cells",
+      "reference_control_lines": [
+        "K562",
+        "RPE1",
+        "HepG2"
+      ],
+      "construction": "scripts/02_build_gene_embedding.py"
+    }
+  },
+  "factorial": {
+    "ranks": [
+      256,
+      512
+    ],
+    "hidden_widths": [
+      1024,
+      2048
+    ],
+    "training_seeds": [
+      7,
+      42,
+      314
+    ],
+    "epochs": 30,
+    "batch_size": 256,
+    "precision": "bf16-mixed",
+    "python_observed": "3.10.15",
+    "hardware_observed": "NVIDIA H20-3e",
+    "n_test_perturbations": 577,
+    "anchor": "Linear",
+    "mean_preserved": true,
+    "approx_training_gpu_hours": 9.005833333333333,
+    "training_gpu_hours_boundary": "Sum of 12 reported single-GPU training times; evaluation time excluded"
+  },
+  "pbmc": {
+    "donors": 12,
+    "cell_types": [
+      "B Intermediate/Memory",
+      "B Naive",
+      "CD4 Memory",
+      "CD8 Memory",
+      "CD14 Mono",
+      "NK"
+    ],
+    "cytokines": 88,
+    "excluded_cytokines": [
+      "IL-15",
+      "IL-17E"
+    ],
+    "cells_per_cloud": 50,
+    "training_cell_seed": 42,
+    "model_seed": 42,
+    "sampling_seeds": [
+      7,
+      42,
+      314
+    ],
+    "pca_dimension": 100,
+    "pca_seed": 42,
+    "source_donors_per_fold": 11,
+    "heldout_donor_training_rows": 0,
+    "target_donor_representation": "Mean over 300 seed-42 PBS cells only; supplied at prediction time",
+    "iterations": 100000,
+    "batch_size": 1024,
+    "python_observed": "3.11.15",
+    "jax_observed": "0.5.3",
+    "control_backend_reproduction_absolute_tolerance": 0.01,
+    "original_control_backend_tolerance": 0.0005,
+    "hardware_reported": [
+      "RTX 3090",
+      "RTX A6000",
+      "A40"
+    ],
+    "total_gpu_hours": null,
+    "total_gpu_hours_note": "A complete synchronized per-fold timing record was not returned; no aggregate GPU-hour estimate is asserted."
+  },
+  "stratification": {
+    "source_lines": [
+      "K562",
+      "RPE1"
+    ],
+    "target_line": "Jurkat",
+    "n_perturbations": 577,
+    "bootstrap_reps": 2000,
+    "bootstrap_seed": 20260726,
+    "intervals": "Descriptive paired perturbation percentile intervals; no multiplicity adjustment",
+    "strata_source_only": true,
+    "core_h5ad_sha256": "51fd2deedd7f659beeae01c6f96e1cf080d780a2dcb76bbb4cd27a1bef35ccf8"
+  }
+}

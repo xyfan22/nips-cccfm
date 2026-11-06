@@ -1,0 +1,29 @@
+cff-version: 1.2.0
+message: "Please cite the paper when using these controls, evaluators, or analysis outputs."
+type: software
+title: "Zero-Shot Cross-Cell-Line Perturbation Prediction Needs Controls"
+version: 0.1.0
+date-released: 2026-11-06
+license: MIT
+repository-code: "https://github.com/xyfan22/nips-cccfm"
+authors:
+  - family-names: "Fan"
+    given-names: "Xingyu"
+    email: "xyfan@link.cuhk.edu.hk"
+    affiliation: "Department of Computer Science and Engineering, The Chinese University of Hong Kong"
+  - family-names: "Wang"
+    given-names: "Jinghao"
+    email: "jinghao.w@link.cuhk.edu.hk"
+    affiliation: "Department of Computer Science and Engineering, The Chinese University of Hong Kong"
+  - family-names: "Hsieh"
+    given-names: "Chang-Yu"
+    email: "kimhsieh@zju.edu.cn"
+    affiliation: "College of Pharmaceutical Sciences, Zhejiang University"
+  - family-names: "Gu"
+    given-names: "Chunbin"
+    email: "cbgu@cuhk.edu.hk"
+    affiliation: "Department of Computer Science and Engineering, The Chinese University of Hong Kong"
+  - family-names: "Heng"
+    given-names: "Pheng-Ann"
+    email: "pheng@cse.cuhk.edu.hk"
+    affiliation: "Department of Computer Science and Engineering, The Chinese University of Hong Kong"

@@ -106,7 +106,7 @@ def compute_block(df: pd.DataFrame, label: str) -> dict:
 
 
 def top3_by(df: pd.DataFrame, col: str, ascending: bool) -> list[tuple[str, float]]:
-    sub = df.dropna(subset=[col]).sort_values(col, ascending=ascending).head(3)
+    sub = df.dropna(subset=[col]).sort_values(col, ascending=ascending, kind="stable").head(3)
     return list(zip(sub["Method"], sub[col]))
 
 

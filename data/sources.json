@@ -1,0 +1,50 @@
+{
+  "description": "Public upstream inputs used in the paper. Licenses and use conditions remain those of the original providers; repository MIT does not relicense these data.",
+  "sources": [
+    {
+      "id": "K562",
+      "filename": "K562_essential_normalized_singlecell_01.h5ad",
+      "url": "https://plus.figshare.com/ndownloader/files/35773219",
+      "record": "https://doi.org/10.25452/figshare.plus.20022944",
+      "size_bytes": 10662212844,
+      "md5": "4f9676939ea97a9c714f38a4cf52fc63",
+      "input_state": "already log1p-normalized"
+    },
+    {
+      "id": "RPE1",
+      "filename": "rpe1_normalized_singlecell_01.h5ad",
+      "url": "https://plus.figshare.com/ndownloader/files/35775606",
+      "record": "https://doi.org/10.25452/figshare.plus.20022944",
+      "size_bytes": 8701143594,
+      "md5": "176029361eadf58caca41f4c46b55b32",
+      "input_state": "already log1p-normalized"
+    },
+    {
+      "id": "Jurkat",
+      "filename": "GSE264667_jurkat_raw_singlecell_01.h5ad",
+      "url": "https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSE264667&format=file&file=GSE264667%5Fjurkat%5Fraw%5Fsinglecell%5F01%2Eh5ad",
+      "record": "https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE264667",
+      "size_bytes": 9366776068,
+      "md5": "1b3daab28734cbc5e884db9ede116bca",
+      "input_state": "raw counts"
+    },
+    {
+      "id": "HepG2",
+      "filename": "GSE264667_hepg2_raw_singlecell_01.h5ad",
+      "url": "https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSE264667&format=file&file=GSE264667%5Fhepg2%5Fraw%5Fsinglecell%5F01%2Eh5ad",
+      "record": "https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE264667",
+      "size_bytes": 5614623998,
+      "md5": "ffef9c1d8f664b9cd332b25cc5d3b76b",
+      "input_state": "raw counts"
+    },
+    {
+      "id": "PBMC",
+      "filename": "adata_for_cellflow_datasets_with_embeddings.h5ad",
+      "url": "https://ndownloader.figshare.com/files/53372768",
+      "record": "https://figshare.com/articles/dataset/pbmc_parse/28589774?file=53372768",
+      "size_bytes": 13101592422,
+      "md5": "d89559875a6c75ab37e0adf84c6e177d",
+      "input_state": "raw counts in public 2000-gene processed derivative; ESM2 embeddings bundled upstream"
+    }
+  ]
+}

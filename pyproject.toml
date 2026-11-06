@@ -1,10 +1,16 @@
 [project]
 name = "cccfm"
-version = "0.0.1"
-description = "Context-Conditioned Conditional Flow Matching for Cross-Cell-Line Perturbation Prediction"
+version = "0.1.0"
+description = "Controls, evaluators, and residual-flow probes for zero-shot cross-cell-line perturbation prediction"
 requires-python = ">=3.10"
 license = {text = "MIT"}
-authors = [{name = "Anonymous"}]
+authors = [
+    {name = "Xingyu Fan", email = "xyfan@link.cuhk.edu.hk"},
+    {name = "Jinghao Wang", email = "jinghao.w@link.cuhk.edu.hk"},
+    {name = "Chang-Yu Hsieh", email = "kimhsieh@zju.edu.cn"},
+    {name = "Chunbin Gu", email = "cbgu@cuhk.edu.hk"},
+    {name = "Pheng-Ann Heng", email = "pheng@cse.cuhk.edu.hk"},
+]
 dependencies = [
     "torch>=2.0",
     "pytorch-lightning>=2.0",
@@ -14,8 +20,8 @@ dependencies = [
     "scanpy>=1.10",
     "scikit-learn>=1.3",
     "pot>=0.9",
-    "scipy>=1.11",
-    "numpy>=1.24",
+    "scipy>=1.15.3,<1.16",
+    "numpy>=1.26,<2.3",
     "pyyaml",
 ]
 
@@ -23,6 +29,9 @@ dependencies = [
 dev = ["pytest", "ipython", "jupyter"]
 logging = ["wandb", "tensorboard"]
 config = ["hydra-core"]
+
+[project.urls]
+Repository = "https://github.com/xyfan22/nips-cccfm"
 
 [build-system]
 requires = ["setuptools>=61", "wheel"]

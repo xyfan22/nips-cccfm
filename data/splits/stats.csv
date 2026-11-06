@@ -1,0 +1,8 @@
+name,value
+total_unique_perts,2395
+shared_perts,577
+jurkat_test_strict,577
+line_perts_HepG2,1061
+line_perts_Jurkat,1815
+line_perts_K562,1832
+line_perts_RPE1,1611

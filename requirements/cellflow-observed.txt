@@ -1,0 +1,18 @@
+# Python 3.11.15; versions recorded in the successful school GPU environment.
+# Select the JAX 0.5.3 CUDA wheel appropriate for the host separately.
+# Install the bundled CellFlow source; see docs/validation_experiments.md.
+numpy==2.4.4
+scipy==1.15.3
+h5py==3.16.0
+pandas==2.3.3
+anndata==0.12.11
+scanpy==1.11.5
+scikit-learn==1.5.1
+jax==0.5.3
+jaxlib==0.5.3
+flax==0.10.4
+diffrax==0.7.2
+optax==0.2.8
+ott-jax==0.6.0
+orbax==0.1.9
+orbax-checkpoint==0.8.0

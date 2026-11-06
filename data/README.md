@@ -1,103 +1,84 @@
-# Data — fetch and rebuild instructions
+# Data acquisition and preparation
 
-The artifact ships **no raw or processed single-cell expression files**.
-Reviewers can complete every documented smoke-test step (`docs/reproducibility.md`)
-without downloading any h5ad: every numeric cell in the paper traces to a
-`_summary.csv` already present under `results/`.
+The biological inputs are public upstream datasets. No single-cell expression
+matrix is included. CPU table reproduction uses released metric CSVs and
+cached source descriptors.
 
-The instructions below are for reviewers who additionally want to (a) verify
-the 577-perturbation × 6{,}642-HVG slice from scratch, or (b) re-run an
-encoder featurization end-to-end.
+## Official inputs
 
-## 1. Source dataset
-
-We use the four-cell-line Replogle CRISPRi Perturb-seq corpus
-(K562, RPE1, HepG2, Jurkat). The raw counts are publicly available from
-the Replogle 2022 release; please consult the original paper for the
-authoritative download instructions:
-
-> Replogle, J. M., Saunders, R. A., Pogson, A. N., et al.
-> *Mapping information-rich genotype–phenotype landscapes with genome-scale
-> Perturb-seq.* Cell, 2022.
-
-Download into `data/raw/` so the layout mirrors the paths used by the
-preprocessing script.
-
-## 2. Preprocessing → `data/processed/replogle_pca.h5ad`
-
-```bash
-python scripts/00_preprocess_data.py
-python scripts/01_build_splits.py
-```
-
-These two scripts together produce:
-
-- `data/processed/replogle_pca.h5ad` — log-normalized counts on the shared
-  6{,}642-HVG common gene space, with the 577-perturbation slice flagged.
-- `data/splits/holdouts.json` — the 2-line and 3-line holdout definitions
-  used by every downstream evaluator call.
-
-The slice construction is described in §3.3 of the paper. Briefly:
-(i) per-line drop perturbations whose target gene is absent from that
-line's expression matrix or that have fewer than 50 cells in that line,
-then (ii) intersect across all four lines (-> 577 perturbations);
-(iii) union of per-line top-2{,}000 HVGs intersected with genes present in
-every line (-> 6{,}642 HVGs).
-
-## 3. Encoder featurization → `data/processed/replogle_<encoder>.h5ad`
-
-```bash
-python scripts/10_featurize_encoder.py --encoder pca
-python scripts/10_featurize_encoder.py --encoder geneformer
-python scripts/10_featurize_encoder.py --encoder scgpt
-python scripts/10_featurize_encoder.py --encoder uce
-python scripts/10_featurize_encoder.py --encoder scfoundation
-python scripts/10_featurize_encoder.py --encoder state_se
-```
-
-Each run writes a per-cell context vector into `adata.obsm["h_<encoder>"]`
-and saves to a dedicated h5ad. The PCA branch fits an `IncrementalPCA(D=128)`
-on source-line controls and is fully self-contained.
-
-The five scFM branches dynamically `sys.path.insert` into the upstream code
-that we vendored under `baselines/<encoder>/`. The vendored copies in this
-artifact include only the upstream Python sources, READMEs, and small
-configs; they DO NOT include the pretrained checkpoints (which are
-distributed separately by each upstream and total tens of GB across all
-five encoders). To run an scFM encoder end-to-end you must:
-
-  1. Install that upstream's pip dependencies, listed in
-     `baselines/<encoder>/requirements.txt` (or equivalent).
-  2. Download the official pretrained checkpoint from the upstream URL
-     below and place it where each `load_pretrained` constructor expects it
-     (path conventions are documented in `code/cccfm/encoders.py`).
-  3. (UCE only) Populate `baselines/UCE/model_files/` with the
-     protein-embedding files distributed by the UCE upstream.
-
-| encoder | upstream | output dim | license |
+| ID | Filename | Official download | Input state |
 |---|---|---|---|
-| Geneformer  | https://huggingface.co/ctheodoris/Geneformer | 768  | Apache-2.0 |
-| scGPT       | https://github.com/bowang-lab/scGPT          | 512  | MIT |
-| UCE         | https://github.com/snap-stanford/UCE         | 1280 | MIT |
-| scFoundation| https://github.com/biomap-research/scFoundation | 3072 | Apache-2.0 |
-| STATE-SE    | https://github.com/ArcInstitute/state        | 2048 | Apache-2.0 |
+| K562 | `K562_essential_normalized_singlecell_01.h5ad` | [Figshare 35773219](https://plus.figshare.com/ndownloader/files/35773219) | Already log1p-normalized |
+| RPE1 | `rpe1_normalized_singlecell_01.h5ad` | [Figshare 35775606](https://plus.figshare.com/ndownloader/files/35775606) | Already log1p-normalized |
+| Jurkat | `GSE264667_jurkat_raw_singlecell_01.h5ad` | [GEO Jurkat file](https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSE264667&format=file&file=GSE264667%5Fjurkat%5Fraw%5Fsinglecell%5F01%2Eh5ad) | Raw counts |
+| HepG2 | `GSE264667_hepg2_raw_singlecell_01.h5ad` | [GEO HepG2 file](https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSE264667&format=file&file=GSE264667%5Fhepg2%5Fraw%5Fsinglecell%5F01%2Eh5ad) | Raw counts |
+| PBMC | `adata_for_cellflow_datasets_with_embeddings.h5ad` | [Figshare 53372768](https://ndownloader.figshare.com/files/53372768) | Public 2,000-gene derivative containing raw counts and cytokine embeddings |
 
-This step is **GPU-only and slow** for the scFM encoders. The artifact's
-documented smoke-test (`docs/reproducibility.md`) does **not** require it:
-every `_summary.csv` shipped under `results/` was already produced from
-cached `obsm["h_<encoder>"]` vectors, and the smoke-test pipeline only
-re-aggregates from those CSVs.
+Source records: [Replogle](https://doi.org/10.25452/figshare.plus.20022944),
+[GSE264667](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE264667),
+[Nadig et al. (HepG2/Jurkat)](https://doi.org/10.1038/s41588-025-02169-3),
+[processed Parse data](https://figshare.com/articles/dataset/pbmc_parse/28589774?file=53372768),
+and [Human Cytokine Dictionary](https://doi.org/10.64898/2025.12.12.693897).
+Original provider terms apply; the repository software license does not replace them.
 
-## 4. SHA-256 of the canonical featurized h5ads
+## Download and verify
 
-> The exact SHA-256 hashes will be added here once the artifact is
-> finalized for OpenReview submission.
+`sources.json` records byte sizes and MD5 hashes of the files used.
+The downloader resumes partial files and verifies completed/existing files.
 
-| file | size | sha256 |
-|---|---|---|
-| `data/processed/replogle_pca.h5ad`         | -- | -- |
-| `data/processed/replogle_geneformer.h5ad`  | -- | -- |
-| `data/processed/replogle_scgpt.h5ad`       | -- | -- |
-| `data/processed/replogle_uce.h5ad`         | -- | -- |
-| `data/processed/replogle_scfoundation.h5ad`| -- | -- |
-| `data/processed/replogle_state_se.h5ad`    | -- | -- |
+```bash
+python scripts/download_data.py --list
+python scripts/download_data.py --dataset K562 RPE1 Jurkat HepG2
+python scripts/download_data.py --dataset PBMC
+```
+
+Files go to `data/raw/`. If a provider rejects automated access, download
+the named file through its official record and place it there; the same command
+verifies an existing file. A different processed gene space is not interchangeable.
+
+## Frozen Replogle definitions
+
+The release includes the ordered 6,642 Ensembl IDs in
+`data/processed/hvg_genes.txt`, the 577-perturbation Jurkat split in
+`data/splits/jurkat_test_strict.json`, and the cross-target/shared lists.
+
+The primary perturbation embedding used by the scripts is **128-dimensional
+PCA of gene-expression patterns across K562/RPE1/HepG2 control cells**.
+It is frozen and projected to a 512-dimensional perturbation token. This is
+not a supplied Gene Ontology embedding. The recorded matrix has 6,641 gene-symbol
+keys; duplicate symbols keep their first feature occurrence. Construction
+statistics are in `data/processed/primary_gene_embedding_stats.csv`.
+
+## Rebuild expression and PCA features
+
+Use the PyTorch environment from the experiment guide:
+
+```bash
+python scripts/00_preprocess_data.py --raw_dir data/raw \
+  --hvg_gene_list data/processed/hvg_genes.txt \
+  --output data/processed/replogle_preprocessed.h5ad \
+  --stats_csv data/processed/preprocess_stats.csv
+python scripts/02_build_gene_embedding.py \
+  --data_path data/processed/replogle_preprocessed.h5ad \
+  --sources K562 RPE1 HepG2 --n_components 128 --seed 42 \
+  --output data/processed/primary_gene_embedding.pt
+python scripts/10_featurize_encoder.py --encoder pca \
+  --data_path data/processed/replogle_preprocessed.h5ad \
+  --fit_sources K562 RPE1 HepG2 --n_components 128
+```
+
+Raw HepG2/Jurkat inputs receive total-count normalization to 10,000 and log1p;
+already normalized K562/RPE1 inputs are retained. The fixed feature list
+bypasses fresh HVG selection. The PCA command appends `obsm["h_pca"]`
+in place and fits controls only. Use the shipped splits for the reported runs.
+
+`provenance/protocols.json` records the historical embedding-file hash
+and the expression-core fingerprint used for stratification. A serialization
+hash identifies the historical file; regenerated PCA/serialization can depend
+on library versions. Preserve input order, versions, and seeds.
+
+## Foundation encoder weights
+
+Weights are not redistributed. Adapters and upstream references are in
+`code/cccfm/encoders.py`, `baselines/`, and `download_list.md`.
+Check checkpoint-specific upstream terms: code and weight licenses can differ.

@@ -1,0 +1,13 @@
+rank,hidden,seed,n_params_velocity,run_id,result_file
+256,1024,7,9736576,rank256_hidden1024_seed7,results/rebuttal/A_fixed_width_rank/rank256_hidden1024_seed7.csv
+256,1024,42,9736576,rank256_hidden1024_seed42,results/rebuttal/A_fixed_width_rank/rank256_hidden1024_seed42.csv
+256,1024,314,9736576,rank256_hidden1024_seed314,results/rebuttal/A_fixed_width_rank/rank256_hidden1024_seed314.csv
+256,2048,7,36233600,rank256_hidden2048_seed7,results/rebuttal/A_fixed_width_rank/rank256_hidden2048_seed7.csv
+256,2048,42,36233600,rank256_hidden2048_seed42,results/rebuttal/A_fixed_width_rank/rank256_hidden2048_seed42.csv
+256,2048,314,36233600,rank256_hidden2048_seed314,results/rebuttal/A_fixed_width_rank/rank256_hidden2048_seed314.csv
+512,1024,7,10261120,rank512_hidden1024_seed7,results/rebuttal/A_fixed_width_rank/rank512_hidden1024_seed7.csv
+512,1024,42,10261120,rank512_hidden1024_seed42,results/rebuttal/A_fixed_width_rank/rank512_hidden1024_seed42.csv
+512,1024,314,10261120,rank512_hidden1024_seed314,results/rebuttal/A_fixed_width_rank/rank512_hidden1024_seed314.csv
+512,2048,7,37282432,rank512_hidden2048_seed7,results/rebuttal/A_fixed_width_rank/rank512_hidden2048_seed7.csv
+512,2048,42,37282432,rank512_hidden2048_seed42,results/rebuttal/A_fixed_width_rank/rank512_hidden2048_seed42.csv
+512,2048,314,37282432,rank512_hidden2048_seed314,results/rebuttal/A_fixed_width_rank/rank512_hidden2048_seed314.csv

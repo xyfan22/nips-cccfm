@@ -1,0 +1,6 @@
+name,value
+n_genes,6641
+n_components,128
+explained_variance_ratio,0.15003928542137146
+source_control_cells,27152
+sources,"K562,RPE1,HepG2"
