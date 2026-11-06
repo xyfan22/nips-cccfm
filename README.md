@@ -7,7 +7,7 @@ Xingyu Fan<sup>1</sup>, Jinghao Wang<sup>1</sup>, Chang-Yu Hsieh<sup>2</sup>, Ch
 <sup>1</sup> Department of Computer Science and Engineering, The Chinese University of Hong Kong<br>
 <sup>2</sup> College of Pharmaceutical Sciences, Zhejiang University
 
-[Camera-ready release](https://github.com/xyfan22/nips-cccfm/releases/tag/v0.1.0) | [Data and preprocessing](data/README.md) | [Full experiment guide](docs/validation_experiments.md)
+[Camera-ready release](https://github.com/xyfan22/crossline-controls/releases/tag/v0.1.0) | [Data and preprocessing](data/README.md) | [Full experiment guide](docs/validation_experiments.md)
 
 Predicting a target cell line's background distribution and predicting its
 perturbation response are different tasks. This work introduces two diagnostic
@@ -26,8 +26,8 @@ descriptors. It requires Python 3.11, with no GPU, checkpoint, or expression-dat
 download.
 
 ```bash
-git clone https://github.com/xyfan22/nips-cccfm.git
-cd nips-cccfm
+git clone https://github.com/xyfan22/crossline-controls.git
+cd crossline-controls
 
 python3.11 -m venv .venv-eval
 source .venv-eval/bin/activate
@@ -110,7 +110,7 @@ python figures/plot_rank_curve.py
 ```
 
 Software citation metadata and author contact information are in
-[CITATION.cff](CITATION.cff). The [v0.1.0 release](https://github.com/xyfan22/nips-cccfm/releases/tag/v0.1.0)
+[CITATION.cff](CITATION.cff). The [v0.1.0 release](https://github.com/xyfan22/crossline-controls/releases/tag/v0.1.0)
 provides a fixed snapshot of the camera-ready code and results.
 
 ## License

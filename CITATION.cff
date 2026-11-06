@@ -5,7 +5,7 @@ title: "Zero-Shot Cross-Cell-Line Perturbation Prediction Needs Controls"
 version: 0.1.0
 date-released: 2026-11-06
 license: MIT
-repository-code: "https://github.com/xyfan22/nips-cccfm"
+repository-code: "https://github.com/xyfan22/crossline-controls"
 authors:
   - family-names: "Fan"
     given-names: "Xingyu"

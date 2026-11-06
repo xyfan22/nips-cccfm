@@ -31,7 +31,7 @@ logging = ["wandb", "tensorboard"]
 config = ["hydra-core"]
 
 [project.urls]
-Repository = "https://github.com/xyfan22/nips-cccfm"
+Repository = "https://github.com/xyfan22/crossline-controls"
 
 [build-system]
 requires = ["setuptools>=61", "wheel"]
