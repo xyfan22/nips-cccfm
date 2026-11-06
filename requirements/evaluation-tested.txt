@@ -1,5 +1,4 @@
 # CPU environment tested on Python 3.11.5, 2026-11-06.
-Using Python 3.11.5 environment at: /tmp/cccfm_release_eval
 anndata==0.11.4
 array-api-compat==1.16.0
 asciitree==1.0.0
